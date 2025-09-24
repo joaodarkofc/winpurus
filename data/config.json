@@ -1,0 +1,77 @@
+{
+  "version": "1.0.0",
+  "settings": {
+    "logLevel": "INFO",
+    "logPath": "C:\\ProgramData\\WinPurus\\winpurus.log",
+    "autoBackup": true,
+    "confirmDestructiveActions": true,
+    "defaultPackageManager": "auto"
+  },
+  "optimization": {
+    "cleanTemp": true,
+    "cleanRecycleBin": true,
+    "removeBloatware": false,
+    "optimizeStartup": true,
+    "enableStorageSense": true,
+    "disableHibernation": false,
+    "ultimatePowerPlan": false
+  },
+  "bloatwareList": [
+    "Microsoft.3DBuilder",
+    "Microsoft.BingWeather",
+    "Microsoft.GetHelp",
+    "Microsoft.Getstarted",
+    "Microsoft.Messaging",
+    "Microsoft.Microsoft3DViewer",
+    "Microsoft.MicrosoftOfficeHub",
+    "Microsoft.MicrosoftSolitaireCollection",
+    "Microsoft.MixedReality.Portal",
+    "Microsoft.OneConnect",
+    "Microsoft.People",
+    "Microsoft.Print3D",
+    "Microsoft.SkypeApp",
+    "Microsoft.Wallet",
+    "Microsoft.WindowsAlarms",
+    "Microsoft.WindowsCamera",
+    "microsoft.windowscommunicationsapps",
+    "Microsoft.WindowsFeedbackHub",
+    "Microsoft.WindowsMaps",
+    "Microsoft.WindowsSoundRecorder",
+    "Microsoft.Xbox.TCUI",
+    "Microsoft.XboxApp",
+    "Microsoft.XboxGameOverlay",
+    "Microsoft.XboxGamingOverlay",
+    "Microsoft.XboxIdentityProvider",
+    "Microsoft.XboxSpeechToTextOverlay",
+    "Microsoft.ZuneMusic",
+    "Microsoft.ZuneVideo"
+  ],
+  "essentialPrograms": {
+    "winget": [
+      "7zip.7zip",
+      "Google.Chrome",
+      "Mozilla.Firefox",
+      "VideoLAN.VLC",
+      "Adobe.Acrobat.Reader.64-bit",
+      "Microsoft.VisualStudioCode",
+      "Git.Git",
+      "Microsoft.PowerToys"
+    ],
+    "chocolatey": [
+      "7zip",
+      "googlechrome",
+      "firefox",
+      "vlc",
+      "adobereader",
+      "vscode",
+      "git",
+      "powertoys"
+    ]
+  },
+  "ui": {
+    "theme": "dark",
+    "transparency": true,
+    "animations": true,
+    "compactMode": false
+  }
+}
