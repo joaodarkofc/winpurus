@@ -1,349 +1,444 @@
-<#
-WinPurus - PowerShell Edition (versão segura, sem ativadores)
-Coloque como C:\Program Files\WinPurus\winpurus.ps1
+# WinPurus - Sistema de Instalação e Manutenção do Windows
+# Versão: 1.0
+# Autor: WinPurus Team
+# Codificação: UTF-8
+# Descrição: Script principal com menu interativo para instalação do Microsoft Office e outras ferramentas
 
-Funcionalidades:
-- Relaunch elevado (se necessário)
-- Menu: instalar/desinstalar (winget), links, teste/reparo de impressora, rede, reparos do sistema
-- Execução remota segura (download -> inspeção -> hash/signature -> confirmação -> execução)
-- Logs em C:\ProgramData\WinPurus\winpurus.log
-#>
+#Requires -Version 5.1
 
-# ---------------------------
-# Configurações iniciais
-# ---------------------------
-$ErrorActionPreference = 'Stop'
-$LogDir = "C:\ProgramData\WinPurus"
-if (-not (Test-Path $LogDir)) { New-Item -Path $LogDir -ItemType Directory -Force | Out-Null }
-$LogFile = Join-Path $LogDir "winpurus.log"
+# Configuração de codificação para suporte completo ao português
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
-function Write-Log {
-    param(
-        [Parameter(Mandatory=$true)][hashtable]$Entry
-    )
-    $Entry.Time = (Get-Date).ToString("o")
-    $json = $Entry | ConvertTo-Json -Depth 6
-    Add-Content -Path $LogFile -Value $json
+# Importar módulo de funções auxiliares
+$ModulePath = Join-Path $PSScriptRoot "WinPurusHelpers.psm1"
+if (Test-Path $ModulePath) {
+    Import-Module $ModulePath -Force
+} else {
+    Write-Error "Módulo WinPurusHelpers.psm1 não encontrado. Certifique-se de que está no mesmo diretório do script."
+    exit 1
 }
 
-# ---------------------------
-# Elevação (UAC)
-# ---------------------------
-function Test-IsAdmin {
-    return ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
-function Relaunch-Elevated {
-    param($ScriptPath, $Args)
-    Write-Host "Solicitando elevação (UAC)..." -ForegroundColor Yellow
-    $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" $Args"
-    Start-Process -FilePath powershell -ArgumentList $argList -Verb RunAs
-    exit
-}
-
-# Se não for admin, relança elevado
-if (-not (Test-IsAdmin)) {
-    $self = $MyInvocation.MyCommand.Path
-    $args = $MyInvocation.UnboundArguments -join ' '
-    Relaunch-Elevated -ScriptPath $self -Args $args
-}
-
-# ---------------------------
-# Helpers e função segura para execução remota
-# ---------------------------
-function Pause-Ui { Read-Host "Pressione Enter para continuar..." }
-
-function Invoke-RemoteScriptSecure {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory=$true, Position=0)][string]$Url,
-        [string]$TrustedSHA256Url = $null,
-        [switch]$RequireElevationForExecution
-    )
-
-    $tmp = Join-Path $env:TEMP "WinPurus_Remote"
-    if (-not (Test-Path $tmp)) { New-Item -Path $tmp -ItemType Directory | Out-Null }
-
-    try {
-        $fileName = [IO.Path]::GetFileName([Uri]$Url)
-        if ([string]::IsNullOrWhiteSpace($fileName)) { $fileName = "remote_$([Guid]::NewGuid()).ps1" }
-        $dest = Join-Path $tmp $fileName
-
-        Write-Host "1/5 - Baixando $Url ..." -ForegroundColor Cyan
-        Invoke-WebRequest -Uri $Url -OutFile $dest -UseBasicParsing -ErrorAction Stop
-
-        Write-Host "2/5 - Pré-visualização (até 200 linhas):" -ForegroundColor Cyan
-        Get-Content $dest -TotalCount 200 | ForEach-Object { Write-Host $_ }
-
-        Write-Host "3/5 - Calculando SHA256..." -ForegroundColor Cyan
-        $fileHash = (Get-FileHash -Path $dest -Algorithm SHA256).Hash
-        Write-Host "SHA256: $fileHash" -ForegroundColor Yellow
-
-        if ($TrustedSHA256Url) {
-            try {
-                Write-Host "4/5 - Baixando hash confiável de $TrustedSHA256Url ..." -ForegroundColor Cyan
-                $trusted = (Invoke-WebRequest -Uri $TrustedSHA256Url -UseBasicParsing -ErrorAction Stop).Content.Trim()
-                Write-Host "Hash confiável obtido: $trusted" -ForegroundColor Yellow
-                if ($trusted -ieq $fileHash) {
-                    Write-Host "Hash confere ✅" -ForegroundColor Green
-                    $hashMatch = $true
-                } else {
-                    Write-Warning "Hash NÃO confere ❌"
-                    $hashMatch = $false
-                }
-            } catch {
-                Write-Warning "Falha ao baixar hash confiável: $_"
-                $hashMatch = $null
-            }
-        } else {
-            $hashMatch = $null
-            Write-Host "Nenhum hash confiável informado; sem comparação automática." -ForegroundColor Yellow
-        }
-
-        Write-Host "5/5 - Verificando assinatura Authenticode (se houver)..." -ForegroundColor Cyan
+# Verificar e solicitar elevação de privilégios se necessário
+function Request-AdminElevation {
+    if (-not (Test-IsAdmin)) {
+        Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Red
+        Write-Host "                    PRIVILÉGIOS INSUFICIENTES                   " -ForegroundColor Red
+        Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Este script requer privilégios de administrador para funcionar corretamente." -ForegroundColor Yellow
+        Write-Host "Relançando o script com elevação UAC..." -ForegroundColor Yellow
+        Write-Host ""
+        
         try {
-            $sig = Get-AuthenticodeSignature -FilePath $dest
-            Write-Host "Signature status: $($sig.Status)" -ForegroundColor Yellow
-            if ($sig.SignerCertificate) { Write-Host "Assinado por: $($sig.SignerCertificate.Subject)" -ForegroundColor Yellow }
+            # Relançar o script como administrador
+            $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`""
+            Start-Process PowerShell -Verb RunAs -ArgumentList $arguments
+            exit 0
         } catch {
-            Write-Warning "Erro ao verificar assinatura: $_"
-            $sig = $null
+            Write-Error "Falha ao elevar privilégios. Execute o PowerShell como Administrador manualmente."
+            Read-Host "Pressione Enter para sair"
+            exit 1
         }
-
-        # Abrir no editor (opcional)
-        $open = Read-Host "Abrir o arquivo no Notepad para inspeção completa? (S/N)"
-        if ($open -match '^[sS]') { Start-Process -FilePath notepad -ArgumentList $dest -Wait }
-
-        # Confirmação de execução
-        $choice = Read-Host "Executar? [S]=aqui | [E]=elevado | [N]=cancelar"
-        $action = "Cancelled"
-        switch ($choice.ToUpper()) {
-            'S' {
-                Write-Host "Executando no contexto atual..." -ForegroundColor Yellow
-                try { & $dest; $action = "Executed-Current" } catch { $action = "Error: $($_.Exception.Message)"; Write-Warning $action }
-            }
-            'E' {
-                $args = "-NoProfile -ExecutionPolicy Bypass -File `"$dest`""
-                Start-Process -FilePath powershell -ArgumentList $args -Verb RunAs
-                $action = "Started-Elevated"
-            }
-            default {
-                Write-Host "Execução cancelada pelo usuário." -ForegroundColor Green
-                $action = "Cancelled"
-            }
-        }
-
-        # grava log
-        $entry = @{
-            Time = (Get-Date).ToString("o")
-            User = $env:USERNAME
-            Url = $Url
-            File = $dest
-            SHA256 = $fileHash
-            TrustedSHA256Url = $TrustedSHA256Url
-            HashMatch = $hashMatch
-            SignatureStatus = if ($sig) { $sig.Status } else { $null }
-            Action = $action
-        }
-        Write-Log -Entry $entry
-
-        Write-Host "Ação registrada em: $LogFile" -ForegroundColor Cyan
-    } catch {
-        Write-Log -Entry @{ Time=(Get-Date).ToString("o"); User=$env:USERNAME; Url=$Url; Error=$_.ToString() }
-        Write-Error "Falha ao processar URL: $_"
     }
 }
 
-# ---------------------------
-# Funções do menu
-# ---------------------------
-function Show-Title {
+# Definição das edições do Microsoft Office com links oficiais pt-BR
+$Global:OfficeEditions = @{
+    # Office 2013
+    "2013" = @{
+        "Office 2013 Home and Student" = "https://officeredir.microsoft.com/r/rlidO15C2RMediaDownload?p1=db&p2=pt-BR&p3=HomeStudentRetail"
+        "Office 2013 Home and Business" = "https://officeredir.microsoft.com/r/rlidO15C2RMediaDownload?p1=db&p2=pt-BR&p3=HomeBusinessRetail"
+        "Office 2013 Professional" = "https://officeredir.microsoft.com/r/rlidO15C2RMediaDownload?p1=db&p2=pt-BR&p3=ProfessionalRetail"
+        "Office 2013 Professional Plus" = "https://officeredir.microsoft.com/r/rlidO15C2RMediaDownload?p1=db&p2=pt-BR&p3=ProPlusRetail"
+        "Word 2013" = "https://officeredir.microsoft.com/r/rlidO15C2RMediaDownload?p1=db&p2=pt-BR&p3=WordRetail"
+        "Excel 2013" = "https://officeredir.microsoft.com/r/rlidO15C2RMediaDownload?p1=db&p2=pt-BR&p3=ExcelRetail"
+        "PowerPoint 2013" = "https://officeredir.microsoft.com/r/rlidO15C2RMediaDownload?p1=db&p2=pt-BR&p3=PowerPointRetail"
+        "Outlook 2013" = "https://officeredir.microsoft.com/r/rlidO15C2RMediaDownload?p1=db&p2=pt-BR&p3=OutlookRetail"
+        "Publisher 2013" = "https://officeredir.microsoft.com/r/rlidO15C2RMediaDownload?p1=db&p2=pt-BR&p3=PublisherRetail"
+        "Access 2013" = "https://officeredir.microsoft.com/r/rlidO15C2RMediaDownload?p1=db&p2=pt-BR&p3=AccessRetail"
+        "Project 2013 Standard" = "https://officeredir.microsoft.com/r/rlidO15C2RMediaDownload?p1=db&p2=pt-BR&p3=ProjectStdRetail"
+        "Project 2013 Professional" = "https://officeredir.microsoft.com/r/rlidO15C2RMediaDownload?p1=db&p2=pt-BR&p3=ProjectProRetail"
+        "Visio 2013 Standard" = "https://officeredir.microsoft.com/r/rlidO15C2RMediaDownload?p1=db&p2=pt-BR&p3=VisioStdRetail"
+        "Visio 2013 Professional" = "https://officeredir.microsoft.com/r/rlidO15C2RMediaDownload?p1=db&p2=pt-BR&p3=VisioProRetail"
+    }
+    
+    # Office 2016
+    "2016" = @{
+        "Office 2016 Home and Student" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/HomeStudentRetail.img"
+        "Office 2016 Home and Business" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/HomeBusinessRetail.img"
+        "Office 2016 Professional" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/ProfessionalRetail.img"
+        "Office 2016 Professional Plus" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/ProPlusRetail.img"
+        "Word 2016" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/WordRetail.img"
+        "Excel 2016" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/ExcelRetail.img"
+        "PowerPoint 2016" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/PowerPointRetail.img"
+        "Outlook 2016" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/OutlookRetail.img"
+        "Publisher 2016" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/PublisherRetail.img"
+        "Access 2016" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/AccessRetail.img"
+        "Project 2016 Standard" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/ProjectStdRetail.img"
+        "Project 2016 Professional" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/ProjectProRetail.img"
+        "Visio 2016 Standard" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/VisioStdRetail.img"
+        "Visio 2016 Professional" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/VisioProRetail.img"
+    }
+    
+    # Office 2019
+    "2019" = @{
+        "Office 2019 Home and Student" = "https://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/HomeStudent2019Retail.img"
+        "Office 2019 Home and Business" = "https://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/HomeBusiness2019Retail.img"
+        "Office 2019 Professional" = "https://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/Professional2019Retail.img"
+        "Office 2019 Professional Plus" = "https://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/ProPlus2019Retail.img"
+        "Word 2019" = "https://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/Word2019Retail.img"
+        "Excel 2019" = "https://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/Excel2019Retail.img"
+        "PowerPoint 2019" = "https://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/PowerPoint2019Retail.img"
+        "Outlook 2019" = "https://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/Outlook2019Retail.img"
+        "Publisher 2019" = "https://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/Publisher2019Retail.img"
+        "Access 2019" = "https://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/Access2019Retail.img"
+        "Project 2019 Standard" = "https://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/ProjectStd2019Retail.img"
+        "Project 2019 Professional" = "https://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/ProjectPro2019Retail.img"
+        "Visio 2019 Standard" = "https://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/VisioStd2019Retail.img"
+        "Visio 2019 Professional" = "https://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/VisioPro2019Retail.img"
+    }
+    
+    # Office 2021
+    "2021" = @{
+        "Office 2021 Home and Student" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/HomeStudent2021Retail.img"
+        "Office 2021 Home and Business" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/HomeBusiness2021Retail.img"
+        "Office 2021 Professional" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/Professional2021Retail.img"
+        "Office 2021 Professional Plus" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/ProPlus2021Retail.img"
+        "Word 2021" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/Word2021Retail.img"
+        "Excel 2021" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/Excel2021Retail.img"
+        "PowerPoint 2021" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/PowerPoint2021Retail.img"
+        "Outlook 2021" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/Outlook2021Retail.img"
+        "Publisher 2021" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/Publisher2021Retail.img"
+        "Access 2021" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/Access2021Retail.img"
+        "Project 2021 Standard" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/ProjectStd2021Retail.img"
+        "Project 2021 Professional" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/ProjectPro2021Retail.img"
+        "Visio 2021 Standard" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/VisioStd2021Retail.img"
+        "Visio 2021 Professional" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/VisioPro2021Retail.img"
+    }
+    
+    # Office 365
+    "365" = @{
+        "Office 365 Home Premium" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/O365HomePremRetail.img"
+        "Office 365 Business" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/O365BusinessRetail.img"
+        "Office 365 Professional Plus" = "https://officecdn.microsoft.com/db/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/pt-BR/O365ProPlusRetail.img"
+    }
+}
+
+# Função para exibir o cabeçalho do programa
+function Show-Header {
     Clear-Host
-    Write-Host "=============================================" -ForegroundColor Cyan
-    Write-Host "             WinPurus - Ferramentas           " -ForegroundColor Cyan
-    Write-Host "=============================================" -ForegroundColor Cyan
-    Write-Host "Data/Hora: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Yellow
+    $currentTime = Get-Date -Format "dd/MM/yyyy HH:mm:ss"
+    
+    Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "                            WinPurus v1.0                      " -ForegroundColor White
+    Write-Host "        Sistema de Instalação e Manutenção do Windows          " -ForegroundColor Gray
+    Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Data/Hora: $currentTime" -ForegroundColor Yellow
+    Write-Host "Usuário: $env:USERNAME" -ForegroundColor Yellow
+    Write-Host "Computador: $env:COMPUTERNAME" -ForegroundColor Yellow
     Write-Host ""
 }
 
-function Option-InstallApp {
-    Write-Host "Instalar aplicativo (winget)" -ForegroundColor Green
-    $app = Read-Host "Digite o ID do pacote (winget) ou URL do instalador local"
-    if ([string]::IsNullOrWhiteSpace($app)) { Write-Host "Cancelado."; return }
-    if ($app -match '^https?://') {
-        Write-Host "Baixando instalador..." -ForegroundColor Yellow
-        $installer = Join-Path $env:TEMP ([IO.Path]::GetFileName($app))
-        Invoke-WebRequest -Uri $app -OutFile $installer -UseBasicParsing -ErrorAction Stop
-        Write-Host "Executando instalador (pode abrir janela)..." -ForegroundColor Yellow
-        Start-Process -FilePath $installer -Wait
-        Write-Log -Entry @{ Action="Install-Installer"; Package=$app; User=$env:USERNAME; Path=$installer }
-    } else {
-        Write-Host "Tentando instalar via winget: $app" -ForegroundColor Yellow
-        try {
-            Start-Process -FilePath winget -ArgumentList "install --accept-source-agreements --accept-package-agreements $app" -NoNewWindow -Wait -ErrorAction Stop
-            Write-Log -Entry @{ Action="Install-Winget"; Package=$app; User=$env:USERNAME }
-        } catch {
-            Write-Warning "Falha ao instalar via winget: $_"
-            Write-Log -Entry @{ Action="Install-Winget-Failed"; Package=$app; Error=$_.ToString(); User=$env:USERNAME }
-        }
-    }
-    Pause-Ui
+# Função para exibir o menu principal
+function Show-MainMenu {
+    Show-Header
+    
+    Write-Host "╔═══════════════════════════════════════════════════════════════╗" -ForegroundColor Green
+    Write-Host "║                        MENU PRINCIPAL                        ║" -ForegroundColor Green
+    Write-Host "╠═══════════════════════════════════════════════════════════════╣" -ForegroundColor Green
+    Write-Host "║                                                               ║" -ForegroundColor Green
+    Write-Host "║  1) Instalar Microsoft Office                                 ║" -ForegroundColor White
+    Write-Host "║  2) Reparos do Windows (SFC/DISM) [Em desenvolvimento]        ║" -ForegroundColor Gray
+    Write-Host "║  3) Rede / Impressoras [Em desenvolvimento]                   ║" -ForegroundColor Gray
+    Write-Host "║                                                               ║" -ForegroundColor Green
+    Write-Host "║  0) Sair                                                      ║" -ForegroundColor Red
+    Write-Host "║                                                               ║" -ForegroundColor Green
+    Write-Host "╚═══════════════════════════════════════════════════════════════╝" -ForegroundColor Green
+    Write-Host ""
 }
 
-function Option-UninstallApp {
-    Write-Host "Desinstalar aplicativo (winget / Get-AppxPackage)" -ForegroundColor Green
-    $choice = Read-Host "Digite 'winget' para usar winget ou 'appx' para apps UWP (Enter para cancelar)"
-    if ($choice -eq 'winget') {
-        $pkg = Read-Host "Digite o ID ou nome do pacote para desinstalar"
-        if ($pkg) {
-            Start-Process -FilePath winget -ArgumentList "uninstall $pkg" -NoNewWindow -Wait
-            Write-Log -Entry @{ Action="Uninstall-Winget"; Package=$pkg; User=$env:USERNAME }
-        }
-    } elseif ($choice -eq 'appx') {
-        $list = Get-AppxPackage | Select-Object Name, PackageFullName
-        $list | Format-Table Name, PackageFullName -AutoSize
-        $pkg = Read-Host "Digite o PackageFullName para remover"
-        if ($pkg) {
-            Remove-AppxPackage -Package $pkg -ErrorAction SilentlyContinue
-            Write-Log -Entry @{ Action="Uninstall-Appx"; Package=$pkg; User=$env:USERNAME }
-        }
-    } else {
-        Write-Host "Cancelado."
-    }
-    Pause-Ui
-}
-
-function Option-Links {
-    Write-Host "Links rápidos" -ForegroundColor Green
-    $links = @{
-        "Intranet" = "https://intranet.example.local"
-        "Portal TI" = "https://portal.example.local"
-        "Suporte Microsoft" = "https://support.microsoft.com"
-    }
-    $i = 1; $map = @{}
-    foreach ($k in $links.Keys) {
-        Write-Host "[$i] $k - $($links[$k])"
-        $map[$i] = $links[$k]
-        $i++
-    }
-    $sel = Read-Host "Escolha (número) ou Enter para voltar"
-    if ($sel -match '^[0-9]+$' -and $map.ContainsKey([int]$sel)) {
-        Start-Process $map[[int]$sel]
-        Write-Log -Entry @{ Action="Open-Link"; Link=$map[[int]$sel]; User=$env:USERNAME }
-    }
-    Pause-Ui
-}
-
-function Option-PrinterTest {
-    Write-Host "Teste de impressora" -ForegroundColor Green
-    try {
-        $printers = Get-Printer | Select-Object -ExpandProperty Name
-    } catch {
-        Write-Warning "Get-Printer não disponível neste sistema." 
-        $printers = @()
-    }
-    if (-not $printers) { Write-Warning "Nenhuma impressora encontrada."; Pause-Ui; return }
-    $i=1; $map=@{}
-    foreach ($p in $printers) { Write-Host "[$i] $p"; $map[$i]=$p; $i++ }
-    $sel = Read-Host "Escolha impressora (número) ou Enter para voltar"
-    if ($sel -match '^[0-9]+$' -and $map.ContainsKey([int]$sel)) {
-        $printerName = $map[[int]$sel]
-        $tmpFile = Join-Path $env:TEMP "winpurus_test_page.txt"
-        "WinPurus Test Page - $(Get-Date)" | Out-File -FilePath $tmpFile -Encoding ascii
-        Get-Content $tmpFile | Out-Printer -Name $printerName
-        Write-Log -Entry @{ Action="Printer-Test"; Printer=$printerName; User=$env:USERNAME }
-        Write-Host "Página de teste enviada para $printerName" -ForegroundColor Green
-    }
-    Pause-Ui
-}
-
-function Option-PrinterRepair {
-    Write-Host "Reparo de impressora (spooler)" -ForegroundColor Green
-    $confirm = Read-Host "Confirma executar reparo no spooler? (S/N)"
-    if ($confirm -notmatch '^[sS]') { Write-Host "Cancelado."; Pause-Ui; return }
-    try {
-        Stop-Service -Name "Spooler" -Force -ErrorAction Stop
-        $spool = "$env:SystemRoot\System32\spool\PRINTERS"
-        if (Test-Path $spool) { Get-ChildItem $spool -Recurse -Force | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue }
-        Start-Service -Name "Spooler"
-        Write-Log -Entry @{ Action="Printer-Repair"; User=$env:USERNAME }
-        Write-Host "Spooler reiniciado e fila limpa." -ForegroundColor Green
-    } catch {
-        Write-Warning "Falha durante reparo: $_"
-        Write-Log -Entry @{ Action="Printer-Repair-Failed"; Error=$_.ToString(); User=$env:USERNAME }
-    }
-    Pause-Ui
-}
-
-function Option-NetworkTools {
-    Write-Host "Ferramentas de Rede" -ForegroundColor Green
-    Write-Host "1) Mostrar IP (ipconfig)"; Write-Host "2) Ping"; Write-Host "3) Renovar DHCP"; Write-Host "Enter para voltar"
-    $c = Read-Host "Escolha"
-    switch ($c) {
-        '1' { ipconfig /all; Write-Log -Entry @{ Action="Network-ShowIP"; User=$env:USERNAME }; Pause-Ui }
-        '2' { $host = Read-Host "Host para ping (ex: 8.8.8.8)"; if ($host) { Test-Connection -ComputerName $host -Count 4; Write-Log -Entry @{ Action="Network-Ping"; Host=$host; User=$env:USERNAME }; Pause-Ui } }
-        '3' { ipconfig /renew; Write-Log -Entry @{ Action="Network-RenewIP"; User=$env:USERNAME }; Pause-Ui }
-        default { }
-    }
-}
-
-function Option-SystemRepair {
-    Write-Host "Reparos do Sistema" -ForegroundColor Green
-    Write-Host "1) Verificar arquivos do sistema (sfc /scannow)"; Write-Host "2) DISM (RestoreHealth)"; Write-Host "Enter para voltar"
-    $choice = Read-Host "Escolha"
-    if ($choice -eq '1') {
-        Write-Host "Executando sfc /scannow (pode demorar)..." -ForegroundColor Yellow
-        sfc /scannow
-        Write-Log -Entry @{ Action="System-SFC"; User=$env:USERNAME }
-        Pause-Ui
-    } elseif ($choice -eq '2') {
-        Write-Host "Executando DISM /RestoreHealth (pode demorar)..." -ForegroundColor Yellow
-        DISM /Online /Cleanup-Image /RestoreHealth
-        Write-Log -Entry @{ Action="System-DISM"; User=$env:USERNAME }
-        Pause-Ui
-    }
-}
-
-# ---------------------------
-# Menu principal
-# ---------------------------
-function Main-Menu {
-    while ($true) {
-        Show-Title
-        Write-Host "1) Instalar aplicativo (winget / instalador)" -ForegroundColor Green
-        Write-Host "2) Desinstalar aplicativo (winget / appx)" -ForegroundColor Green
-        Write-Host "3) Links rápidos" -ForegroundColor Green
-        Write-Host "4) Teste de impressora" -ForegroundColor Green
-        Write-Host "5) Reparo de impressora (spooler)" -ForegroundColor Green
-        Write-Host "6) Rede e conectividade" -ForegroundColor Green
-        Write-Host "7) Reparos do sistema (SFC/DISM)" -ForegroundColor Green
-        Write-Host "8) Executar script remoto (seguro)" -ForegroundColor Green
-        Write-Host "0) Sair" -ForegroundColor Cyan
-
-        $opt = Read-Host "Escolha uma opção"
-        switch ($opt) {
-            '1' { Option-InstallApp }
-            '2' { Option-UninstallApp }
-            '3' { Option-Links }
-            '4' { Option-PrinterTest }
-            '5' { Option-PrinterRepair }
-            '6' { Option-NetworkTools }
-            '7' { Option-SystemRepair }
-            '8' {
-                $url = Read-Host "Digite a URL do script remoto (ou Enter para voltar)"
-                if ($url) {
-                    $trusted = Read-Host "Se houver URL com SHA256 confiável, cole aqui (opcional) ou Enter"
-                    Invoke-RemoteScriptSecure -Url $url -TrustedSHA256Url $trusted
-                }
-                Pause-Ui
+# Função para exibir o submenu do Microsoft Office
+function Show-OfficeMenu {
+    Show-Header
+    
+    Write-Host "╔═══════════════════════════════════════════════════════════════╗" -ForegroundColor Blue
+    Write-Host "║                    INSTALAÇÃO MICROSOFT OFFICE               ║" -ForegroundColor Blue
+    Write-Host "╠═══════════════════════════════════════════════════════════════╣" -ForegroundColor Blue
+    Write-Host "║                                                               ║" -ForegroundColor Blue
+    Write-Host "║  Selecione a versão e edição do Office que deseja instalar:  ║" -ForegroundColor White
+    Write-Host "║                                                               ║" -ForegroundColor Blue
+    Write-Host "╚═══════════════════════════════════════════════════════════════╝" -ForegroundColor Blue
+    Write-Host ""
+    
+    $optionNumber = 1
+    $optionMap = @{}
+    
+    # Exibir opções organizadas por versão
+    foreach ($version in @("2013", "2016", "2019", "2021", "365")) {
+        $versionName = if ($version -eq "365") { "Office 365" } else { "Office $version" }
+        Write-Host "═══ $versionName ═══" -ForegroundColor Yellow
+        
+        foreach ($edition in $Global:OfficeEditions[$version].Keys | Sort-Object) {
+            $optionMap[$optionNumber] = @{
+                Version = $version
+                Edition = $edition
+                Url = $Global:OfficeEditions[$version][$edition]
             }
-            '0' { break }
-            default { Write-Host "Opção inválida." -ForegroundColor Red; Pause-Ui }
+            
+            Write-Host ("{0,2}) {1}" -f $optionNumber, $edition) -ForegroundColor White
+            $optionNumber++
         }
+        Write-Host ""
     }
+    
+    Write-Host "0) Voltar ao menu principal" -ForegroundColor Red
+    Write-Host ""
+    
+    return $optionMap
 }
 
-# ---------------------------
-# Iniciar
-# ---------------------------
-Main-Menu
+# Função para instalar uma edição específica do Office
+function Install-OfficeEdition {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Edition,
+        
+        [Parameter(Mandatory = $true)]
+        [string]$Version,
+        
+        [Parameter(Mandatory = $true)]
+        [string]$Url
+    )
+    
+    try {
+        Write-Log -Message "Iniciando instalação do $Edition" -Action "INSTALL_OFFICE" -Item $Edition -Url $Url
+        
+        # Verificar conectividade de rede
+        Write-Host "Verificando conectividade de rede..." -ForegroundColor Yellow
+        if (-not (Test-NetworkConnection)) {
+            throw "Sem conexão com a internet. Verifique sua conexão e tente novamente."
+        }
+        Write-Host "✓ Conexão com a internet confirmada" -ForegroundColor Green
+        
+        # Determinar nome do arquivo e diretório de destino
+        $fileName = if ($Url -like "*.img") {
+            "$($Edition -replace '[^\w\s-]', '').img"
+        } else {
+            "$($Edition -replace '[^\w\s-]', '').exe"
+        }
+        
+        $destDir = "$env:TEMP\WinPurus\Office\$Version\$($Edition -replace '[^\w\s-]', '')"
+        $destPath = Join-Path $destDir $fileName
+        
+        # Exibir resumo antes do download
+        Write-Host ""
+        Write-Host "╔═══════════════════════════════════════════════════════════════╗" -ForegroundColor Magenta
+        Write-Host "║                      RESUMO DA INSTALAÇÃO                    ║" -ForegroundColor Magenta
+        Write-Host "╠═══════════════════════════════════════════════════════════════╣" -ForegroundColor Magenta
+        Write-Host "║ Produto: $($Edition.PadRight(49)) ║" -ForegroundColor White
+        Write-Host "║ Versão: Office $($Version.PadRight(45)) ║" -ForegroundColor White
+        Write-Host "║ URL: $($Url.Substring(0, [Math]::Min(53, $Url.Length)).PadRight(53)) ║" -ForegroundColor White
+        Write-Host "║ Destino: $($destPath.Substring(0, [Math]::Min(49, $destPath.Length)).PadRight(49)) ║" -ForegroundColor White
+        Write-Host "╚═══════════════════════════════════════════════════════════════╝" -ForegroundColor Magenta
+        Write-Host ""
+        
+        # Solicitar confirmação
+        if (-not (Get-UserConfirmation "Deseja prosseguir com o download e instalação?")) {
+            Write-Host "Instalação cancelada pelo usuário." -ForegroundColor Yellow
+            Write-Log -Message "Instalação cancelada pelo usuário" -Result "FAILURE" -Details "Usuário cancelou"
+            return
+        }
+        
+        # Iniciar download
+        Write-Host ""
+        Write-Host "Iniciando download..." -ForegroundColor Green
+        $downloadedFile = Start-FileDownload -Url $Url -Destination $destPath
+        
+        # Verificar se o download foi bem-sucedido
+        if (-not (Test-Path $downloadedFile)) {
+            throw "Falha no download. Arquivo não encontrado."
+        }
+        
+        $fileSize = [math]::Round((Get-Item $downloadedFile).Length / 1MB, 2)
+        Write-Host "✓ Download concluído! Tamanho: ${fileSize}MB" -ForegroundColor Green
+        
+        # Solicitar confirmação final antes da instalação
+        Write-Host ""
+        if (-not (Get-UserConfirmation "Deseja prosseguir com a instalação?")) {
+            Write-Host "Instalação cancelada pelo usuário." -ForegroundColor Yellow
+            Write-Log -Message "Instalação cancelada após download" -Result "FAILURE" -Details "Usuário cancelou após download"
+            return
+        }
+        
+        # Processar instalação baseado no tipo de arquivo
+        if ($downloadedFile -like "*.img" -or $downloadedFile -like "*.iso") {
+            # Arquivo de imagem - montar e instalar
+            Write-Host ""
+            Write-Host "Montando imagem de disco..." -ForegroundColor Yellow
+            
+            $mountInfo = Mount-OfficeImage -ImagePath $downloadedFile
+            
+            try {
+                Write-Host "✓ Imagem montada em: $($mountInfo.MountPath)" -ForegroundColor Green
+                Write-Host "✓ Setup encontrado em: $($mountInfo.SetupPath)" -ForegroundColor Green
+                
+                # Executar instalação
+                Write-Host ""
+                Write-Host "Iniciando instalação do Office..." -ForegroundColor Green
+                Write-Host "ATENÇÃO: A instalação pode demorar vários minutos. Aguarde..." -ForegroundColor Yellow
+                
+                $startTime = Get-Date
+                $process = Start-Process -FilePath $mountInfo.SetupPath -Wait -PassThru
+                $endTime = Get-Date
+                $duration = $endTime - $startTime
+                
+                if ($process.ExitCode -eq 0) {
+                    Write-Host "✓ Instalação concluída com sucesso!" -ForegroundColor Green
+                    Write-Host "Tempo de instalação: $($duration.ToString('mm\:ss'))" -ForegroundColor Cyan
+                    Write-Log -Message "Instalação concluída com sucesso" -Result "SUCCESS" -Details "ExitCode: 0, Duração: $($duration.ToString('mm\:ss'))"
+                } else {
+                    Write-Host "⚠ Instalação finalizada com código de saída: $($process.ExitCode)" -ForegroundColor Yellow
+                    Write-Log -Message "Instalação finalizada com aviso" -Level "WARNING" -Result "SUCCESS" -Details "ExitCode: $($process.ExitCode)"
+                }
+                
+            } finally {
+                # Desmontar imagem
+                Write-Host ""
+                Write-Host "Desmontando imagem..." -ForegroundColor Yellow
+                Dismount-OfficeImage -ImagePath $downloadedFile
+            }
+            
+        } else {
+            # Arquivo executável - executar diretamente
+            Write-Host ""
+            Write-Host "Iniciando instalação..." -ForegroundColor Green
+            Write-Host "ATENÇÃO: A instalação pode demorar vários minutos. Aguarde..." -ForegroundColor Yellow
+            
+            $startTime = Get-Date
+            $process = Start-Process -FilePath $downloadedFile -Wait -PassThru
+            $endTime = Get-Date
+            $duration = $endTime - $startTime
+            
+            if ($process.ExitCode -eq 0) {
+                Write-Host "✓ Instalação concluída com sucesso!" -ForegroundColor Green
+                Write-Host "Tempo de instalação: $($duration.ToString('mm\:ss'))" -ForegroundColor Cyan
+                Write-Log -Message "Instalação concluída com sucesso" -Result "SUCCESS" -Details "ExitCode: 0, Duração: $($duration.ToString('mm\:ss'))"
+            } else {
+                Write-Host "⚠ Instalação finalizada com código de saída: $($process.ExitCode)" -ForegroundColor Yellow
+                Write-Log -Message "Instalação finalizada com aviso" -Level "WARNING" -Result "SUCCESS" -Details "ExitCode: $($process.ExitCode)"
+            }
+        }
+        
+        # Limpeza opcional do arquivo baixado
+        Write-Host ""
+        if (Get-UserConfirmation "Deseja remover o arquivo de instalação baixado para liberar espaço?") {
+            Remove-Item $downloadedFile -Force
+            Write-Host "✓ Arquivo de instalação removido." -ForegroundColor Green
+        }
+        
+        Write-Host ""
+        Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Green
+        Write-Host "                    INSTALAÇÃO FINALIZADA                     " -ForegroundColor Green
+        Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Green
+        
+    } catch {
+        $errorMsg = $_.Exception.Message
+        Write-Host ""
+        Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Red
+        Write-Host "                        ERRO NA INSTALAÇÃO                    " -ForegroundColor Red
+        Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Red
+        Write-Host "Erro: $errorMsg" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Sugestões para resolver o problema:" -ForegroundColor Yellow
+        Write-Host "• Verifique sua conexão com a internet" -ForegroundColor White
+        Write-Host "• Certifique-se de ter espaço suficiente em disco (mínimo 5GB)" -ForegroundColor White
+        Write-Host "• Execute o script como Administrador" -ForegroundColor White
+        Write-Host "• Tente baixar manualmente do link oficial da Microsoft" -ForegroundColor White
+        
+        Write-Log -Message "Erro na instalação: $errorMsg" -Level "ERROR" -Result "FAILURE" -Details $errorMsg
+    }
+    
+    Write-Host ""
+    Write-Host "Pressione qualquer tecla para voltar ao menu..." -ForegroundColor Cyan
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+}
+
+# Função principal do programa
+function Start-WinPurus {
+    # Verificar e solicitar elevação se necessário
+    Request-AdminElevation
+    
+    # Inicializar log
+    Write-Log -Message "WinPurus iniciado" -Action "START_APPLICATION" -Details "Versão 1.0"
+    
+    # Loop principal do menu
+    do {
+        Show-MainMenu
+        
+        Write-Host "Selecione uma opção: " -ForegroundColor Cyan -NoNewline
+        $choice = Read-Host
+        
+        switch ($choice) {
+            "1" {
+                # Submenu do Microsoft Office
+                do {
+                    $officeOptions = Show-OfficeMenu
+                    
+                    Write-Host "Selecione uma opção: " -ForegroundColor Cyan -NoNewline
+                    $officeChoice = Read-Host
+                    
+                    if ($officeChoice -eq "0") {
+                        break
+                    }
+                    
+                    if ($officeOptions.ContainsKey([int]$officeChoice)) {
+                        $selectedOption = $officeOptions[[int]$officeChoice]
+                        Install-OfficeEdition -Edition $selectedOption.Edition -Version $selectedOption.Version -Url $selectedOption.Url
+                    } else {
+                        Write-Host "Opção inválida! Pressione qualquer tecla para continuar..." -ForegroundColor Red
+                        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+                    }
+                } while ($true)
+            }
+            
+            "2" {
+                Write-Host ""
+                Write-Host "Funcionalidade em desenvolvimento..." -ForegroundColor Yellow
+                Write-Host "Pressione qualquer tecla para continuar..." -ForegroundColor Cyan
+                $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            }
+            
+            "3" {
+                Write-Host ""
+                Write-Host "Funcionalidade em desenvolvimento..." -ForegroundColor Yellow
+                Write-Host "Pressione qualquer tecla para continuar..." -ForegroundColor Cyan
+                $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            }
+            
+            "0" {
+                Write-Host ""
+                Write-Host "Encerrando WinPurus..." -ForegroundColor Yellow
+                Write-Log -Message "WinPurus encerrado pelo usuário" -Action "EXIT_APPLICATION"
+                break
+            }
+            
+            default {
+                Write-Host ""
+                Write-Host "Opção inválida! Pressione qualquer tecla para continuar..." -ForegroundColor Red
+                $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            }
+        }
+    } while ($true)
+}
+
+# Iniciar o programa
+try {
+    Start-WinPurus
+} catch {
+    Write-Error "Erro crítico no WinPurus: $($_.Exception.Message)"
+    Write-Log -Message "Erro crítico: $($_.Exception.Message)" -Level "ERROR" -Result "FAILURE"
+    Read-Host "Pressione Enter para sair"
+    exit 1
+}
